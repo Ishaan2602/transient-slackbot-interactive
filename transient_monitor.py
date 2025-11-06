@@ -20,7 +20,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'askap_integration'))
 
 try:
-    from askap_image_processor import ASKAPImageProcessor
+    from askap_image_processor import ASKAPImageProcessor # type: ignore
     ASKAP_AVAILABLE = True
 except ImportError:
     ASKAP_AVAILABLE = False

@@ -1,64 +1,40 @@
-# Transient Monitoring System with ASKAP Integration
+# Transient Monitor
 
-This system monitors astronomical transients and automatically posts notifications to Slack with optional ASKAP radio images.
+Checks for new transients and posts them to slack workspace with radio images.
 
-## Quick Start
+## Setup
 
-1. **Install dependencies:**
-   pip install -r install_requirements.txt
+Install modules:
+pip install -r install_requirements.txt
 
-2. **Run the monitor:**
-   python transient_monitor.py
+Run monitor (scheduled for 12:00 PM):
+python transient_monitor.py
 
-### Slack Configuration
-- **Bot Token:** Set in `transient_monitor.py` or environment variable
-- **Channel ID:** Configure target Slack channel
-- **Signing Secret:** Required for Slack app authentication
+## Config information
 
-### ASKAP Configuration
-- **CASDA Username:** CASDA account email
-- **CASDA Password:**  CASDA account password
-- **Data Directories:** Automatically created in project folder
-
-### Environment Variables (Recommended)
-```bash
+Set these environment variables:
 export CASDA_USERNAME_PERSONAL='your_email@domain.com'
 export CASDA_PASSWORD_PERSONAL='your_password'
-```
+
+Update the Slack tokens in `transient_monitor.py` with the appropriate bot tokens.
+
+## How it works
+
+1. Reads `transients.txt` for new entries
+2. Gets ASKAP radio images if available
+3. Posts to Slack channel
+4. Tracks what's been processed in `new_transients.csv`
 
 ## Testing
 
-1. **Test ASKAP setup:**
-   ```bash
-   python tests/test_askap_setup.py
-   ```
+```bash
+python tests/test_askap_setup.py
+python tests/test_image_generation.py
+python utilities/view_last_transients.py
+```
 
-2. **Test image generation:**
-   ```bash
-   python tests/test_image_generation.py
-   ```
+## Notes
 
-3. **View recent transients:**
-   ```bash
-   python utilities/view_last_transients.py
-   ```
-
-## Scheduling
-
-The monitor runs:
-- **Initial check** on startup
-- **Scheduled checks** daily at 12:00 PM
-- **Background Slack app** for real-time integration
-
-## ASKAP Integration
-
-When enabled, the system:
-1. Queries CASDA for ASKAP radio images around transient coordinates
-2. Downloads 2.5 arcminute cutouts
-3. Processes data to 2D images
-4. Creates thumbnails with axes
-
-
-### Other notes
-
-1. **No ASKAP images:** Expected for some coordinate pairs
+- Runs daily at 12:00 PM automatically (will push server-side and test with ngrok later)
+- Not all transients will have ASKAP images (expected)
+- Check Slack bot permissions if messages don't appear
