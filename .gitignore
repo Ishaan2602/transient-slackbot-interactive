@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Data files (large)
+askap_data/
+askap_images/
+*.fits
+*.png
+
+# Logs
+*.log
+last_check.txt
+
+# OS files
+desktop.ini
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables (if you add a .env file)
+.env
+
+# Large data files
+*.csv
+transients.txt
+new_transients.csv
