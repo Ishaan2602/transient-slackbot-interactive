@@ -1,16 +1,10 @@
 import pandas as pd
 
 def print_last_transients(file_path, num_transients=5):
-    """Print information about the last N transients from the txt file."""
     try:
-        # Load the transients data (tab-separated)
-        print(f"Loading transients data from {file_path}")
         data = pd.read_csv(file_path, sep='\t')
-        
-        # Get the last N transients
         last_transients = data.tail(num_transients)
-        
-        print(f"\n=== LAST {num_transients} TRANSIENTS ===\n")
+        print(f"Last {num_transients} transients:")
         
         for index, row in last_transients.iterrows():
             print(f"Transient #{len(data) - num_transients + (index - last_transients.index[0]) + 1}")
@@ -33,8 +27,7 @@ def print_last_transients(file_path, num_transients=5):
         print(f"Error reading transients data: {e}")
 
 if __name__ == "__main__":
-    # File path
-    transients_file = r'c:\Users\eluru\UIUC\obscos\transients.txt'
-    
-    # Print last 5 transients
+    import os
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    transients_file = os.path.join(base_dir, 'transients.txt')
     print_last_transients(transients_file, 5)

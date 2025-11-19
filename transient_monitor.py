@@ -26,12 +26,39 @@ except ImportError:
     ASKAP_AVAILABLE = False
     print("Warning: ASKAP integration not available")
 
+# WISE Integration
+sys.path.append(os.path.join(os.path.dirname(__file__), 'wise_integration'))
+
+try:
+    from wise_image_processor import WISEImageProcessor # type: ignore
+    WISE_AVAILABLE = True
+except ImportError:
+    WISE_AVAILABLE = False
+    print("Warning: WISE integration not available")
+
+# Voting System Integration
+sys.path.append(os.path.join(os.path.dirname(__file__), 'voting_system'))
+
+try:
+    from voting_system.vote_tracker import VoteTracker # type: ignore
+    from voting_system.reaction_handler import ReactionHandler # type: ignore
+    VOTING_AVAILABLE = True
+except ImportError:
+    try:
+        # Fallback to direct import
+        from vote_tracker import VoteTracker # type: ignore
+        from reaction_handler import ReactionHandler # type: ignore
+        VOTING_AVAILABLE = True
+    except ImportError:
+        VOTING_AVAILABLE = False
+        print("Warning: Voting system not available")
+
 # Personal DM 
-#SLACK_BOT_TOKEN = 'xoxb-451463007363-961890814290-FkmLQF1HKzTDGAeebVvzU7Y7' # invalid!
+#SLACK_BOT_TOKEN = '---' # invalid!
 #CHANNEL_ID = "D09H0DHR56C"  # Personal channel
 
 # Transientbot Channel
-SLACK_BOT_TOKEN = 'xoxb-451463007363-9618908142950-FkmLQF1HKzTDGAeebVvzU7Y7'
+SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 CHANNEL_ID = "C09KLUNLU68"  # transientbot channel
 
 # tbd
@@ -55,6 +82,10 @@ LAST_CHECK_FILE = os.path.join(BASE_DIR, 'last_check.txt')
 ASKAP_DATA_DIR = os.path.join(BASE_DIR, 'askap_data')
 ASKAP_IMAGES_DIR = os.path.join(BASE_DIR, 'askap_images')
 
+# WISE data directories
+WISE_DATA_DIR = os.path.join(BASE_DIR, 'wise_data')
+WISE_IMAGES_DIR = os.path.join(BASE_DIR, 'wise_images')
+
 # Initialize Slack app
 app = App(
     token=SLACK_BOT_TOKEN,
@@ -71,10 +102,27 @@ if ASKAP_AVAILABLE:
         images_dir=ASKAP_IMAGES_DIR
     )
 
+# Initialize WISE processor (if available)
+wise_processor = None
+if WISE_AVAILABLE:
+    wise_processor = WISEImageProcessor(
+        wise_data_dir=WISE_DATA_DIR,
+        wise_images_dir=WISE_IMAGES_DIR
+    )
+
+# Initialize voting system (if available)
+vote_tracker = None
+reaction_handler = None
+if VOTING_AVAILABLE:
+    vote_tracker = VoteTracker(BASE_DIR)
+    reaction_handler = ReactionHandler(app, BASE_DIR)
+
 def setup_directories():
     """Create necessary directories."""
     os.makedirs(ASKAP_DATA_DIR, exist_ok=True)
     os.makedirs(ASKAP_IMAGES_DIR, exist_ok=True)
+    os.makedirs(WISE_DATA_DIR, exist_ok=True)
+    os.makedirs(WISE_IMAGES_DIR, exist_ok=True)
 
 def load_last_check_time():
     """Load the last check time from file, or return a default time."""
@@ -158,7 +206,24 @@ def generate_askap_image_for_transient(row, ra, dec):
         
     return image_path
 
-def format_transient_message(row, ra, dec, askap_image_path=None):
+def generate_wise_image_for_transient(row, ra, dec):
+    """Generate WISE image for a transient."""
+    if not WISE_AVAILABLE or wise_processor is None:
+        return None
+    
+    source_name = f"{row['source']}_{row['observation']}"
+    
+    print(f"Generating WISE image for {source_name}...")
+    image_path = wise_processor.process_transient_wise_image(source_name, ra, dec)
+    
+    if image_path:
+        print(f"WISE image generated: {os.path.basename(image_path)}")
+    else:
+        print(f"Failed to generate WISE image for {source_name}")
+        
+    return image_path
+
+def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None):
     """Format a transient detection into a Slack message with rich blocks."""
     source_name = f"{row['source']}_{row['observation']}"
     
@@ -237,34 +302,49 @@ def format_transient_message(row, ra, dec, askap_image_path=None):
             }
         })
     
-    # Add ASKAP image status
+    # Add image status section
+    image_fields = []
+    
+    # ASKAP image status
     if askap_image_path and os.path.exists(askap_image_path):
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*ASKAP Radio Image:* Generated"
-            }
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "📡 *ASKAP Radio:* Generated"
         })
     elif ASKAP_AVAILABLE:
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "📡 *ASKAP Radio:* No data available"
+        })
+    
+    # WISE image status
+    if wise_image_path and os.path.exists(wise_image_path):
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "🌌 *WISE Infrared:* Generated"
+        })
+    elif WISE_AVAILABLE:
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "🌌 *WISE Infrared:* Processing..."
+        })
+    
+    if image_fields:
         blocks.append({
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "📸 *ASKAP Radio Image:* No data available for this location"
-            }
+            "fields": image_fields
         })
     
     blocks.append({"type": "divider"})
     
     return blocks
 
-def post_transient_to_slack(row, ra, dec, askap_image_path=None):
-    """Post transient detection to Slack with optional ASKAP image."""
+def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path=None):
+    """Post transient detection to Slack with optional ASKAP and WISE images."""
     source_name = f"{row['source']}_{row['observation']}"
-    blocks = format_transient_message(row, ra, dec, askap_image_path)
+    blocks = format_transient_message(row, ra, dec, askap_image_path, wise_image_path)
     
-    # Upload image if available
+    # Upload ASKAP image if available
     if askap_image_path and os.path.exists(askap_image_path):
         app.client.files_upload_v2(
             channel=CHANNEL_ID,
@@ -274,12 +354,28 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None):
         )
         print(f"Uploaded ASKAP image for {source_name}")
     
+    # Upload WISE image if available
+    if wise_image_path and os.path.exists(wise_image_path):
+        app.client.files_upload_v2(
+            channel=CHANNEL_ID,
+            file=wise_image_path,
+            title=f"WISE Infrared Image - {source_name}",
+            initial_comment=""
+        )
+        print(f"Uploaded WISE image for {source_name}")
+    
     # Post the message
-    app.client.chat_postMessage(
+    response = app.client.chat_postMessage(
         channel=CHANNEL_ID,
         text=f"New transient detected: {source_name}",
         blocks=blocks
     )
+    
+    # Add voting reactions if voting system is available
+    if VOTING_AVAILABLE and reaction_handler and response.get("ok"):
+        message_ts = response.get("ts")
+        if message_ts:
+            reaction_handler.add_voting_reactions(CHANNEL_ID, message_ts)
     
     print(f"Posted {source_name} to Slack")
     return True
@@ -343,8 +439,13 @@ def check_for_new_transients():
             if ASKAP_AVAILABLE and askap_processor:
                 askap_image_path = generate_askap_image_for_transient(row, ra, dec)
             
+            # Generate WISE image
+            wise_image_path = None
+            if WISE_AVAILABLE and wise_processor:
+                wise_image_path = generate_wise_image_for_transient(row, ra, dec)
+            
             # Post to Slack
-            post_transient_to_slack(row, ra, dec, askap_image_path)
+            post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path)
             
             if i < len(transients_to_post) - 1:
                 time.sleep(2)
@@ -381,6 +482,60 @@ def run_scheduler():
     while True:
         schedule.run_pending()
         time.sleep(60)
+
+# Slack command handlers
+@app.message("voting results")
+def handle_voting_results(message, say):
+    """Handle voting results command"""
+    if not VOTING_AVAILABLE or not vote_tracker:
+        say("Voting system not available")
+        return
+    
+    try:
+        # Get top priority transients
+        top_transients = vote_tracker.get_top_transients(10)
+        
+        if not top_transients:
+            say("No votes recorded yet")
+            return
+        
+        response = "*Voting Results - Top Priority Transients:*\n\n"
+        
+        for i, transient_id in enumerate(top_transients):
+            votes = vote_tracker.get_transient_votes(transient_id)
+            if votes:
+                total = sum(votes.values())
+                if total > 0:
+                    response += f"*{i+1}. {transient_id}* (Total: {total})\n"
+                    response += f"   AGN: {votes['AGN']} | Interesting: {votes['Interesting']} | "
+                    response += f"Star: {votes['Star']} | Junk: {votes['Junk']}\n\n"
+        
+        if len(response) < 100:  # Only header
+            say("No votes recorded yet")
+        else:
+            say(response)
+            
+    except Exception as e:
+        say(f"Error getting voting results: {e}")
+
+@app.message("vote summary")
+def handle_vote_summary(message, say):
+    """Handle vote summary command for specific transient"""
+    text = message.get('text', '')
+    words = text.split()
+    
+    if len(words) < 3:
+        say("Usage: vote summary <transient_id>")
+        return
+    
+    transient_id = words[2]
+    
+    if not VOTING_AVAILABLE or not reaction_handler:
+        say("Voting system not available")
+        return
+    
+    summary = reaction_handler.get_voting_summary(transient_id)
+    say(f"*{transient_id}*\n{summary}")
 
 def start_bolt_app():
     """Start the Slack Bolt app."""
