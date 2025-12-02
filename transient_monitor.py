@@ -1,22 +1,13 @@
-"""
-Transient Monitor with ASKAP Image Integration
-
-Monitors transients.txt for new detections and posts to Slack with ASKAP images.
-Data flow: transients.txt -> new_transients.csv -> Slack notifications
-"""
-
 import pandas as pd
 import numpy as np
 import os
+import sys
 from datetime import datetime, timedelta
 from slack_bolt import App
-from slack_sdk.errors import SlackApiError
 import schedule
 import time
 import threading
 
-# ASKAP Integration
-import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'askap_integration'))
 
 try:
@@ -53,26 +44,12 @@ except ImportError:
         VOTING_AVAILABLE = False
         print("Warning: Voting system not available")
 
-# Personal DM 
-#SLACK_BOT_TOKEN = '---' # invalid!
-#CHANNEL_ID = "D09H0DHR56C"  # Personal channel
-
-# Transientbot Channel
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
-CHANNEL_ID = "C09KLUNLU68"  # transientbot channel
-
-# tbd
-#SLACK_BOT_TOKEN = 'xoxb---------------'
-#CHANNEL_ID = "--------"  # future channel
-
+CHANNEL_ID = "C09KLUNLU68"
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET', 'de2481e9523c65ac16ae1c5bad90a28d')
 
-# ASKAP Configuration
-# NOTE: using CASDA_USERNAME_'PERSONAL' for now! Change later
 CASDA_USERNAME = os.getenv('CASDA_USERNAME_PERSONAL', 'ishaang6@illinois.edu')
 CASDA_PASSWORD = os.getenv('CASDA_PASSWORD_PERSONAL', 'obscos_transient')
-
-# File paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRANSIENTS_TXT = os.path.join(BASE_DIR, 'transients.txt')
 NEW_TRANSIENTS_CSV = os.path.join(BASE_DIR, 'new_transients.csv')
@@ -92,155 +69,83 @@ app = App(
     signing_secret=SLACK_SIGNING_SECRET
 )
 
-# Initialize ASKAP processor (if available)
-askap_processor = None
-if ASKAP_AVAILABLE:
-    askap_processor = ASKAPImageProcessor(
-        username=CASDA_USERNAME,
-        password=CASDA_PASSWORD,
-        data_dir=ASKAP_DATA_DIR,
-        images_dir=ASKAP_IMAGES_DIR
-    )
-
-# Initialize WISE processor (if available)
-wise_processor = None
-if WISE_AVAILABLE:
-    wise_processor = WISEImageProcessor(
-        wise_data_dir=WISE_DATA_DIR,
-        wise_images_dir=WISE_IMAGES_DIR
-    )
-
-# Initialize voting system (if available)
-vote_tracker = None
-reaction_handler = None
-if VOTING_AVAILABLE:
-    vote_tracker = VoteTracker(BASE_DIR)
-    reaction_handler = ReactionHandler(app, BASE_DIR)
+askap_processor = ASKAPImageProcessor(CASDA_USERNAME, CASDA_PASSWORD, ASKAP_DATA_DIR, ASKAP_IMAGES_DIR) if ASKAP_AVAILABLE else None
+wise_processor = WISEImageProcessor(WISE_DATA_DIR, WISE_IMAGES_DIR) if WISE_AVAILABLE else None
+vote_tracker = VoteTracker(BASE_DIR) if VOTING_AVAILABLE else None
+reaction_handler = ReactionHandler(app, BASE_DIR) if VOTING_AVAILABLE else None
 
 def setup_directories():
-    """Create necessary directories."""
-    os.makedirs(ASKAP_DATA_DIR, exist_ok=True)
-    os.makedirs(ASKAP_IMAGES_DIR, exist_ok=True)
-    os.makedirs(WISE_DATA_DIR, exist_ok=True)
-    os.makedirs(WISE_IMAGES_DIR, exist_ok=True)
+    for d in [ASKAP_DATA_DIR, ASKAP_IMAGES_DIR, WISE_DATA_DIR, WISE_IMAGES_DIR]:
+        os.makedirs(d, exist_ok=True)
 
 def load_last_check_time():
-    """Load the last check time from file, or return a default time."""
     try:
         if os.path.exists(LAST_CHECK_FILE):
             with open(LAST_CHECK_FILE, 'r') as f:
-                dt = datetime.fromisoformat(f.read().strip())
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=pd.Timestamp.now(tz='UTC').tz)
-                return dt
+                return datetime.fromisoformat(f.read().strip())
     except:
         pass
     return pd.Timestamp.now(tz='UTC') - timedelta(hours=24)
 
-def save_last_check_time(check_time):
-    """Save the current check time to file."""
+def save_last_check_time(t):
     with open(LAST_CHECK_FILE, 'w') as f:
-        if isinstance(check_time, datetime) and check_time.tzinfo is None:
-            check_time = pd.Timestamp(check_time, tz='UTC')
-        f.write(check_time.isoformat())
+        f.write(t.isoformat())
 
 def load_processed_transients():
-    """Load previously processed transients from CSV."""
     if os.path.exists(NEW_TRANSIENTS_CSV):
-        processed = pd.read_csv(NEW_TRANSIENTS_CSV)
-        print(f"Loaded {len(processed)} previously processed transients")
-        return processed
-    
+        df = pd.read_csv(NEW_TRANSIENTS_CSV)
+        print(f"Loaded {len(df)} processed transients")
+        return df
     return pd.DataFrame(columns=['source', 'observation', 'ra[deg]', 'dec[deg]', 
                                 'field', 'time', 'test_statistic', 'status', 'processed_at'])
 
-def save_new_transients(new_transients_df, processed_df):
-    """Append new transients to the processed transients CSV."""
-    new_transients_df = new_transients_df.copy()
-    new_transients_df['processed_at'] = pd.Timestamp.now(tz='UTC').isoformat()
-    
-    columns_to_save = ['source', 'observation', 'ra[deg]', 'dec[deg]', 
-                      'field', 'time', 'test_statistic', 'status', 'processed_at']
-    new_transients_subset = new_transients_df[columns_to_save]
-    
-    if len(processed_df) > 0:
-        combined_df = pd.concat([processed_df, new_transients_subset], ignore_index=True)
-    else:
-        combined_df = new_transients_subset
-    
-    combined_df.to_csv(NEW_TRANSIENTS_CSV, index=False)
-    print(f"Saved {len(new_transients_df)} new transients to CSV")
+def save_new_transients(new_df, processed_df):
+    new_df = new_df.copy()
+    new_df['processed_at'] = pd.Timestamp.now(tz='UTC').isoformat()
+    cols = ['source', 'observation', 'ra[deg]', 'dec[deg]', 'field', 'time', 'test_statistic', 'status', 'processed_at']
+    subset = new_df[cols]
+    combined = pd.concat([processed_df, subset], ignore_index=True) if len(processed_df) > 0 else subset
+    combined.to_csv(NEW_TRANSIENTS_CSV, index=False)
+    print(f"Saved {len(new_df)} transients")
 
 def process_transient_coordinates(row):
-    """Process coordinates, using centroid if available, otherwise ra/dec."""
-    # Use centroid coordinates if available and valid
-    if ('centroid_ra[deg]' in row.index and 
-        not pd.isna(row['centroid_ra[deg]']) and 
-        not np.isnan(float(row['centroid_ra[deg]']))):
-        ra = float(row['centroid_ra[deg]'])
-        dec = float(row['centroid_dec[deg]'])
+    if 'centroid_ra[deg]' in row.index and not pd.isna(row['centroid_ra[deg]']):
+        ra, dec = float(row['centroid_ra[deg]']), float(row['centroid_dec[deg]'])
     else:
-        ra = float(row['ra[deg]'])
-        dec = float(row['dec[deg]'])
-    
-    # Ensure RA is in [0, 360) range
-    if ra < 0:
-        ra = ra + 360.0
-    
-    return ra, dec
+        ra, dec = float(row['ra[deg]']), float(row['dec[deg]'])
+    return (ra + 360 if ra < 0 else ra), dec
 
 def generate_askap_image_for_transient(row, ra, dec):
-    """Generate ASKAP image for a transient."""
-    if not ASKAP_AVAILABLE or askap_processor is None:
+    if not ASKAP_AVAILABLE or not askap_processor:
         return None
-    
-    source_name = f"{row['source']}_{row['observation']}"
-    
-    print(f"Generating ASKAP image for {source_name}...")
-    image_path = askap_processor.process_transient(source_name, ra, dec)
-    
-    if image_path:
-        print(f"ASKAP image generated: {os.path.basename(image_path)}")
-    else:
-        print(f"Failed to generate ASKAP image for {source_name}")
-        
-    return image_path
+    name = f"{row['source']}_{row['observation']}"
+    print(f"Generating ASKAP for {name}...")
+    return askap_processor.process_transient(name, ra, dec)
 
 def generate_wise_image_for_transient(row, ra, dec):
-    """Generate WISE image for a transient."""
-    if not WISE_AVAILABLE or wise_processor is None:
+    if not WISE_AVAILABLE or not wise_processor:
         return None
-    
-    source_name = f"{row['source']}_{row['observation']}"
-    
-    print(f"Generating WISE image for {source_name}...")
-    image_path = wise_processor.process_transient_wise_image(source_name, ra, dec)
-    
-    if image_path:
-        print(f"WISE image generated: {os.path.basename(image_path)}")
-    else:
-        print(f"Failed to generate WISE image for {source_name}")
-        
-    return image_path
+    name = f"{row['source']}_{row['observation']}"
+    print(f"Generating WISE for {name}...")
+    return wise_processor.process_transient_wise_image(name, ra, dec)
 
 def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None):
-    """Format a transient detection into a Slack message with rich blocks."""
     source_name = f"{row['source']}_{row['observation']}"
     
-    # Convert RA to hours:minutes:seconds
     ra_hours = ra / 15.0
     ra_h = int(ra_hours)
     ra_m = int((ra_hours - ra_h) * 60)
     ra_s = ((ra_hours - ra_h) * 60 - ra_m) * 60
     
-    # Convert Dec to degrees:arcminutes:arcseconds
     dec_sign = "+" if dec >= 0 else "-"
     dec_abs = abs(dec)
     dec_d = int(dec_abs)
     dec_m = int((dec_abs - dec_d) * 60)
     dec_s = ((dec_abs - dec_d) * 60 - dec_m) * 60
     
-    detection_time = pd.to_datetime(row['time']).strftime('%Y-%m-%d %H:%M:%S UTC')
+    detection_time = pd.to_datetime(row['time']).strftime('%Y-%m-%d %H:%M UTC')
+    
+    time = pd.to_datetime(row['time']).strftime('%Y-%m-%d %H:%M UTC')
     
     # Build message blocks
     blocks = [
@@ -309,24 +214,24 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
     if askap_image_path and os.path.exists(askap_image_path):
         image_fields.append({
             "type": "mrkdwn",
-            "text": "📡 *ASKAP Radio:* Generated"
+            "text": "*ASKAP Radio:* Generated"
         })
     elif ASKAP_AVAILABLE:
         image_fields.append({
             "type": "mrkdwn",
-            "text": "📡 *ASKAP Radio:* No data available"
+            "text": "*ASKAP Radio:* No data available"
         })
     
     # WISE image status
     if wise_image_path and os.path.exists(wise_image_path):
         image_fields.append({
             "type": "mrkdwn",
-            "text": "🌌 *WISE Infrared:* Generated"
+            "text": "*WISE Infrared:* Generated"
         })
     elif WISE_AVAILABLE:
         image_fields.append({
             "type": "mrkdwn",
-            "text": "🌌 *WISE Infrared:* Processing..."
+            "text": "*WISE Infrared:* Processing..."
         })
     
     if image_fields:
@@ -336,6 +241,13 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
         })
     
     blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": "Vote: 🔥 Interesting | 🌌 AGN | ⭐ Star | 🗑️ Junk"
+        }]
+    })
     
     return blocks
 
@@ -344,38 +256,43 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path
     source_name = f"{row['source']}_{row['observation']}"
     blocks = format_transient_message(row, ra, dec, askap_image_path, wise_image_path)
     
-    # Upload ASKAP image if available
-    if askap_image_path and os.path.exists(askap_image_path):
-        app.client.files_upload_v2(
-            channel=CHANNEL_ID,
-            file=askap_image_path,
-            title=f"ASKAP Radio Image - {source_name}",
-            initial_comment=""
-        )
-        print(f"Uploaded ASKAP image for {source_name}")
-    
-    # Upload WISE image if available
-    if wise_image_path and os.path.exists(wise_image_path):
-        app.client.files_upload_v2(
-            channel=CHANNEL_ID,
-            file=wise_image_path,
-            title=f"WISE Infrared Image - {source_name}",
-            initial_comment=""
-        )
-        print(f"Uploaded WISE image for {source_name}")
-    
-    # Post the message
+    # Post the main message with detailed blocks first
     response = app.client.chat_postMessage(
         channel=CHANNEL_ID,
         text=f"New transient detected: {source_name}",
         blocks=blocks
     )
     
-    # Add voting reactions if voting system is available
-    if VOTING_AVAILABLE and reaction_handler and response.get("ok"):
-        message_ts = response.get("ts")
-        if message_ts:
-            reaction_handler.add_voting_reactions(CHANNEL_ID, message_ts)
+    # Get the message timestamp for threading images
+    message_ts = response.get("ts") if response.get("ok") else None
+    
+    # Add voting reactions to the main message
+    if VOTING_AVAILABLE and reaction_handler and message_ts:
+        reaction_handler.add_voting_reactions(CHANNEL_ID, message_ts)
+    
+    # Upload images as replies to the main message (threaded)
+    if message_ts:
+        if askap_image_path and os.path.exists(askap_image_path):
+            print(f"Uploading ASKAP image for {source_name}...")
+            app.client.files_upload_v2(
+                channel=CHANNEL_ID,
+                file=askap_image_path,
+                title=f"ASKAP Radio Image - {source_name}",
+                thread_ts=message_ts,
+                initial_comment=""
+            )
+            print(f"ASKAP image uploaded for {source_name}")
+        
+        if wise_image_path and os.path.exists(wise_image_path):
+            print(f"Uploading WISE image for {source_name}...")
+            app.client.files_upload_v2(
+                channel=CHANNEL_ID,
+                file=wise_image_path,
+                title=f"WISE Infrared Image - {source_name}",
+                thread_ts=message_ts,
+                initial_comment=""
+            )
+            print(f"WISE image uploaded for {source_name}")
     
     print(f"Posted {source_name} to Slack")
     return True
@@ -444,11 +361,13 @@ def check_for_new_transients():
             if WISE_AVAILABLE and wise_processor:
                 wise_image_path = generate_wise_image_for_transient(row, ra, dec)
             
-            # Post to Slack
+            # Post to Slack (this includes uploading images)
             post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path)
             
+            # Substantial delay between transients to ensure all uploads complete
             if i < len(transients_to_post) - 1:
-                time.sleep(2)
+                print(f"Waiting 5 seconds to ensure all uploads complete before next transient...")
+                time.sleep(5)
         
         # Save processed transients
         save_new_transients(transients_to_post, processed_transients)
