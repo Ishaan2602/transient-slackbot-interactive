@@ -147,6 +147,12 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
     
     time = pd.to_datetime(row['time']).strftime('%Y-%m-%d %H:%M UTC')
     
+    # Determine peak flux display
+    if pd.notna(row['peak_flux[mJy]']):
+        peak_flux_text = f"{row['peak_flux[mJy]']:.2f} mJy"
+    else:
+        peak_flux_text = f"{row['peak_flux_90[mJy]']:.2f} mJy (90 GHz), {row['peak_flux_150[mJy]']:.2f} mJy (150 GHz)"
+    
     # Build message blocks
     blocks = [
         {
@@ -187,7 +193,7 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Peak Flux:*\n{row['peak_flux[mJy]']:.2f} mJy"
+                    "text": f"*Peak Flux:*\n{peak_flux_text}"
                 },
                 {
                     "type": "mrkdwn",
