@@ -36,3 +36,6 @@ Thumbs.db
 *.csv
 transients.txt
 new_transients.csv
+
+# Reference notebooks (read-only, not tracked)
+How_to_use_the_Simple_Image_Access_service.ipynb

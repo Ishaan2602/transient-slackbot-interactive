@@ -129,6 +129,11 @@ def generate_wise_image_for_transient(row, ra, dec):
     print(f"Generating WISE for {name}...")
     return wise_processor.process_transient_wise_image(name, ra, dec)
 
+def generate_reference_links(ra, dec):
+    legacy_url = f"https://www.legacysurvey.org/viewer?ra={ra:.5f}&dec={dec:.5f}&layer=ls-dr10&zoom=14&mark={ra:.5f},{dec:.5f}"
+    simbad_url = f"http://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra:.5f}+{dec:.5f}"
+    return legacy_url, simbad_url
+
 def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None):
     source_name = f"{row['source']}_{row['observation']}"
     
@@ -246,6 +251,16 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
             "fields": image_fields
         })
     
+    # Add reference links
+    legacy_url, simbad_url = generate_reference_links(ra, dec)
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"*View location:* <{legacy_url}|Legacy Survey> | <{simbad_url}|SIMBAD>"
+        }
+    })
+    
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "context",
@@ -266,39 +281,34 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path
     response = app.client.chat_postMessage(
         channel=CHANNEL_ID,
         text=f"New transient detected: {source_name}",
-        blocks=blocks
+        blocks=blocks,
+        unfurl_links=False
     )
     
-    # Get the message timestamp for threading images
     message_ts = response.get("ts") if response.get("ok") else None
     
     # Add voting reactions to the main message
     if VOTING_AVAILABLE and reaction_handler and message_ts:
         reaction_handler.add_voting_reactions(CHANNEL_ID, message_ts)
     
-    # Upload images as replies to the main message (threaded)
-    if message_ts:
-        if askap_image_path and os.path.exists(askap_image_path):
-            print(f"Uploading ASKAP image for {source_name}...")
-            app.client.files_upload_v2(
-                channel=CHANNEL_ID,
-                file=askap_image_path,
-                title=f"ASKAP Radio Image - {source_name}",
-                thread_ts=message_ts,
-                initial_comment=""
-            )
-            print(f"ASKAP image uploaded for {source_name}")
-        
-        if wise_image_path and os.path.exists(wise_image_path):
-            print(f"Uploading WISE image for {source_name}...")
-            app.client.files_upload_v2(
-                channel=CHANNEL_ID,
-                file=wise_image_path,
-                title=f"WISE Infrared Image - {source_name}",
-                thread_ts=message_ts,
-                initial_comment=""
-            )
-            print(f"WISE image uploaded for {source_name}")
+    # Upload images as a separate message (not threaded)
+    images_to_upload = []
+    if askap_image_path and os.path.exists(askap_image_path):
+        images_to_upload.append(askap_image_path)
+    if wise_image_path and os.path.exists(wise_image_path):
+        images_to_upload.append(wise_image_path)
+    
+    if images_to_upload:
+        print(f"Uploading {len(images_to_upload)} images for {source_name}...")
+        app.client.files_upload_v2(
+            channel=CHANNEL_ID,
+            file_uploads=[
+                {"file": img_path, "title": os.path.basename(img_path)}
+                for img_path in images_to_upload
+            ],
+            initial_comment=f"Images for {source_name}"
+        )
+        print(f"Images uploaded for {source_name}")
     
     print(f"Posted {source_name} to Slack")
     return True
@@ -347,8 +357,8 @@ def check_for_new_transients():
             if not askap_processor.authenticate():
                 print("CASDA authentication failed - proceeding without images")
         
-        # Process up to 5 transients per run
-        transients_to_post = final_new_transients.head(5)
+        # Process all new transients
+        transients_to_post = final_new_transients
         
         for i, (index, row) in enumerate(transients_to_post.iterrows()):
             print(f"\nProcessing {i+1}/{len(transients_to_post)}: {row['source']}_{row['observation']}")
@@ -370,10 +380,10 @@ def check_for_new_transients():
             # Post to Slack (this includes uploading images)
             post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path)
             
-            # Substantial delay between transients to ensure all uploads complete
+            # Wait between transients to ensure all uploads complete
             if i < len(transients_to_post) - 1:
-                print(f"Waiting 5 seconds to ensure all uploads complete before next transient...")
-                time.sleep(5)
+                print(f"Waiting 15 seconds before next transient...")
+                time.sleep(15)
         
         # Save processed transients
         save_new_transients(transients_to_post, processed_transients)
