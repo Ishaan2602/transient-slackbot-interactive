@@ -133,7 +133,7 @@ class WISEImageProcessor:
         
         print(f"Created mosaic: {output_file}")
     
-    def generate_wise_thumbnail(self, source_name, ra, dec, output_size="5x5"):
+    def generate_wise_thumbnail(self, source_name, ra, dec, output_size="5x5", ts_map_path=None):
         if output_size == "2x2":
             radius = 0.01666666
             scalebar_size = 2.77778e-3
@@ -143,7 +143,8 @@ class WISEImageProcessor:
             scalebar_size = 3 * 2.77778e-3
             scalebar_label = '30"'
         
-        thumbnail_path = os.path.join(self.wise_images_dir, f"{source_name}_WISE_thumb_{output_size}.png")
+        suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
+        thumbnail_path = os.path.join(self.wise_images_dir, f"{source_name}_WISE_thumb_{output_size}{suffix}.png")
         if os.path.exists(thumbnail_path):
             print(f"WISE thumbnail for {source_name} already exists")
             return thumbnail_path
@@ -169,8 +170,16 @@ class WISEImageProcessor:
         f.ticks.set_color(color='black')
         f.ticks.set_length(length=20.0, minor_factor=0.5)
         
-        f.recenter(ra, dec, radius=radius)
+        # Don't recenter for cutouts - they're already centered
+        # f.recenter(ra, dec, radius=radius)
         f.show_markers(ra, dec, marker='+', s=250, facecolor='cyan')
+        
+        if ts_map_path and os.path.exists(ts_map_path):
+            ts_data = fits.getdata(ts_map_path)
+            maxTS = np.nanmax(ts_data)
+            print(f"TS map found: maxTS = {maxTS:.2f}")
+            f.show_contour(ts_map_path, colors='red', levels=np.array([maxTS-11.83, maxTS-6.18, maxTS-2.3]))
+        
         f.show_grayscale(vmin=4.0, vmax=90000.0, stretch='log', smooth=None)
         
         f.add_scalebar(scalebar_size)
@@ -179,7 +188,8 @@ class WISEImageProcessor:
         f.scalebar.set_font(size='x-large')
         f.scalebar.set_linewidth(2)
         
-        f.set_title(f'{source_name} WISE grayscale {output_size}')
+        title_suffix = ' w TS map' if ts_map_path and os.path.exists(ts_map_path) else ''
+        f.set_title(f'{source_name} WISE grayscale {output_size}{title_suffix}')
         
         fig.canvas.draw()
         fig.savefig(thumbnail_path, dpi=150, bbox_inches='tight')
@@ -197,7 +207,9 @@ class WISEImageProcessor:
             print(f"Failed to download WISE data for {source_name}")
             return None
         
-        thumbnail_path = self.generate_wise_thumbnail(source_name, ra, dec, "5x5")
+        ts_maps_dir = os.path.join(os.path.dirname(self.wise_data_dir), 'ts_maps')
+        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+        thumbnail_path = self.generate_wise_thumbnail(source_name, ra, dec, "5x5", ts_map_path)
         
         return thumbnail_path
 

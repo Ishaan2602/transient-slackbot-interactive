@@ -27,6 +27,16 @@ except ImportError:
     WISE_AVAILABLE = False
     print("Warning: WISE integration not available")
 
+# DECam Integration
+sys.path.append(os.path.join(os.path.dirname(__file__), 'decam_integration'))
+
+try:
+    from decam_image_processor import DECamImageProcessor # type: ignore
+    DECAM_AVAILABLE = True
+except ImportError:
+    DECAM_AVAILABLE = False
+    print("Warning: DECam integration not available")
+
 # Voting System Integration
 sys.path.append(os.path.join(os.path.dirname(__file__), 'voting_system'))
 
@@ -50,6 +60,8 @@ SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET', 'de2481e9523c65ac16ae1c
 
 CASDA_USERNAME = os.getenv('CASDA_USERNAME_PERSONAL', 'ishaang6@illinois.edu')
 CASDA_PASSWORD = os.getenv('CASDA_PASSWORD_PERSONAL', 'obscos_transient')
+DATALAB_USERNAME = os.getenv('DATALAB_USERNAME')
+DATALAB_PASSWORD = os.getenv('DATALAB_PASSWORD')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRANSIENTS_TXT = os.path.join(BASE_DIR, 'transients.txt')
 NEW_TRANSIENTS_CSV = os.path.join(BASE_DIR, 'new_transients.csv')
@@ -63,6 +75,13 @@ ASKAP_IMAGES_DIR = os.path.join(BASE_DIR, 'askap_images')
 WISE_DATA_DIR = os.path.join(BASE_DIR, 'wise_data')
 WISE_IMAGES_DIR = os.path.join(BASE_DIR, 'wise_images')
 
+# DECam data directories
+DECAM_DATA_DIR = os.path.join(BASE_DIR, 'decam_data')
+DECAM_IMAGES_DIR = os.path.join(BASE_DIR, 'decam_images')
+
+# TS maps directory
+TS_MAPS_DIR = os.path.join(BASE_DIR, 'ts_maps')
+
 # Initialize Slack app
 app = App(
     token=SLACK_BOT_TOKEN,
@@ -71,11 +90,12 @@ app = App(
 
 askap_processor = ASKAPImageProcessor(CASDA_USERNAME, CASDA_PASSWORD, ASKAP_DATA_DIR, ASKAP_IMAGES_DIR) if ASKAP_AVAILABLE else None
 wise_processor = WISEImageProcessor(WISE_DATA_DIR, WISE_IMAGES_DIR) if WISE_AVAILABLE else None
+decam_processor = DECamImageProcessor(DATALAB_USERNAME, DATALAB_PASSWORD, DECAM_DATA_DIR, DECAM_IMAGES_DIR) if DECAM_AVAILABLE else None
 vote_tracker = VoteTracker(BASE_DIR) if VOTING_AVAILABLE else None
 reaction_handler = ReactionHandler(app, BASE_DIR) if VOTING_AVAILABLE else None
 
 def setup_directories():
-    for d in [ASKAP_DATA_DIR, ASKAP_IMAGES_DIR, WISE_DATA_DIR, WISE_IMAGES_DIR]:
+    for d in [ASKAP_DATA_DIR, ASKAP_IMAGES_DIR, WISE_DATA_DIR, WISE_IMAGES_DIR, DECAM_DATA_DIR, DECAM_IMAGES_DIR, TS_MAPS_DIR]:
         os.makedirs(d, exist_ok=True)
 
 def load_last_check_time():
@@ -129,12 +149,19 @@ def generate_wise_image_for_transient(row, ra, dec):
     print(f"Generating WISE for {name}...")
     return wise_processor.process_transient_wise_image(name, ra, dec)
 
+def generate_decam_image_for_transient(row, ra, dec):
+    if not DECAM_AVAILABLE or not decam_processor:
+        return None
+    name = f"{row['source']}_{row['observation']}"
+    print(f"Generating DECam for {name}...")
+    return decam_processor.process_transient(name, ra, dec)
+
 def generate_reference_links(ra, dec):
     legacy_url = f"https://www.legacysurvey.org/viewer?ra={ra:.5f}&dec={dec:.5f}&layer=ls-dr10&zoom=14&mark={ra:.5f},{dec:.5f}"
     simbad_url = f"http://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra:.5f}+{dec:.5f}"
     return legacy_url, simbad_url
 
-def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None):
+def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None, decam_image_path=None):
     source_name = f"{row['source']}_{row['observation']}"
     
     ra_hours = ra / 15.0
@@ -245,6 +272,18 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
             "text": "*WISE Infrared:* Processing..."
         })
     
+    # DECam image status
+    if decam_image_path and os.path.exists(decam_image_path):
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "*DECam Optical:* Generated"
+        })
+    elif DECAM_AVAILABLE:
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "*DECam Optical:* Processing..."
+        })
+    
     if image_fields:
         blocks.append({
             "type": "section",
@@ -272,10 +311,10 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
     
     return blocks
 
-def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path=None):
+def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path=None, decam_image_path=None):
     """Post transient detection to Slack with optional ASKAP and WISE images."""
     source_name = f"{row['source']}_{row['observation']}"
-    blocks = format_transient_message(row, ra, dec, askap_image_path, wise_image_path)
+    blocks = format_transient_message(row, ra, dec, askap_image_path, wise_image_path, decam_image_path)
     
     # Post the main message with detailed blocks first
     response = app.client.chat_postMessage(
@@ -297,6 +336,8 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path
         images_to_upload.append(askap_image_path)
     if wise_image_path and os.path.exists(wise_image_path):
         images_to_upload.append(wise_image_path)
+    if decam_image_path and os.path.exists(decam_image_path):
+        images_to_upload.append(decam_image_path)
     
     if images_to_upload:
         print(f"Uploading {len(images_to_upload)} images for {source_name}...")
@@ -357,6 +398,12 @@ def check_for_new_transients():
             if not askap_processor.authenticate():
                 print("CASDA authentication failed - proceeding without images")
         
+        # Initialize DECam processor
+        if DECAM_AVAILABLE and decam_processor:
+            print("Authenticating with Data Lab...")
+            if not decam_processor.authenticate():
+                print("Data Lab authentication failed - proceeding without images")
+        
         # Process all new transients
         transients_to_post = final_new_transients
         
@@ -377,8 +424,13 @@ def check_for_new_transients():
             if WISE_AVAILABLE and wise_processor:
                 wise_image_path = generate_wise_image_for_transient(row, ra, dec)
             
+            # Generate DECam image
+            decam_image_path = None
+            if DECAM_AVAILABLE and decam_processor:
+                decam_image_path = generate_decam_image_for_transient(row, ra, dec)
+            
             # Post to Slack (this includes uploading images)
-            post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path)
+            post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path, decam_image_path)
             
             # Wait between transients to ensure all uploads complete
             if i < len(transients_to_post) - 1:

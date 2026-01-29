@@ -176,7 +176,7 @@ class ASKAPImageProcessor:
         print(f"FITS processing complete: {final_fits}")
         return array_askap, final_fits
     
-    def generate_thumbnail(self, fits_path, source_name, ra_deg, dec_deg):
+    def generate_thumbnail(self, fits_path, source_name, ra_deg, dec_deg, ts_map_path=None):
         if not IMAGE_GENERATION_AVAILABLE:
             print("Image generation libraries not available")
             return None
@@ -185,7 +185,8 @@ class ASKAPImageProcessor:
             print(f"FITS file not found: {fits_path}")
             return None
         
-        image_path = os.path.join(self.images_dir, f'{source_name}_ASKAP_thumb_5x5.png')
+        suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
+        image_path = os.path.join(self.images_dir, f'{source_name}_ASKAP_thumb_5x5{suffix}.png')
         
         print(f"Generating thumbnail image...")
         
@@ -206,8 +207,16 @@ class ASKAPImageProcessor:
         f.ticks.set_color(color='black')
         f.ticks.set_length(length=20.0, minor_factor=0.5)
         
-        f.recenter(ra_deg, dec_deg, radius=0.041666666)
+        # Don't recenter for cutouts - they're already centered
+        # f.recenter(ra_deg, dec_deg, radius=0.035)
         f.show_markers(ra_deg, dec_deg, marker='+', s=250, facecolor='cyan')
+        
+        if ts_map_path and os.path.exists(ts_map_path):
+            ts_data = fits.getdata(ts_map_path)
+            maxTS = np.nanmax(ts_data)
+            print(f"TS map found: maxTS = {maxTS:.2f}")
+            f.show_contour(ts_map_path, colors='red', levels=np.array([maxTS-11.83, maxTS-6.18, maxTS-2.3]))
+        
         f.show_grayscale(pmin=70.0, pmax=99.9, stretch='log', smooth=None)
         
         f.add_scalebar(3*2.77778e-3)
@@ -216,7 +225,8 @@ class ASKAPImageProcessor:
         f.scalebar.set_font(size='x-large')
         f.scalebar.set_linewidth(2)
         
-        f.set_title(f'{source_name} ASKAP grayscale 5x5')
+        title_suffix = ' w TS map' if ts_map_path and os.path.exists(ts_map_path) else ''
+        f.set_title(f'{source_name} ASKAP grayscale 5x5{title_suffix}')
         
         fig.canvas.draw()
         fig.savefig(image_path, dpi=150)
@@ -243,7 +253,10 @@ class ASKAPImageProcessor:
         print(f"Coordinates: RA={ra_deg:.6f}°, Dec={dec_deg:.6f}°")
         print("-" * 60)
         
-        image_path = os.path.join(self.images_dir, f'{source_name}_ASKAP_thumb_5x5.png')
+        ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
+        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+        suffix = '_w_TS' if os.path.exists(ts_map_path) else ''
+        image_path = os.path.join(self.images_dir, f'{source_name}_ASKAP_thumb_5x5{suffix}.png')
         if os.path.exists(image_path):
             print(f"Image already exists: {image_path}")
             return image_path
@@ -265,7 +278,9 @@ class ASKAPImageProcessor:
         if final_fits is None:
             return None
         
-        image_path = self.generate_thumbnail(final_fits, source_name, ra_deg, dec_deg)
+        ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
+        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+        image_path = self.generate_thumbnail(final_fits, source_name, ra_deg, dec_deg, ts_map_path)
         
         self.cleanup_temp_files(source_name)
         

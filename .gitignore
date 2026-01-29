@@ -11,6 +11,10 @@ venv/
 # Data files (large)
 askap_data/
 askap_images/
+wise_data/
+wise_images/
+decam_data/
+decam_images/
 *.fits
 *.png
 
@@ -36,6 +40,18 @@ Thumbs.db
 *.csv
 transients.txt
 new_transients.csv
+data/
+voting_data/
+ts_maps/
 
-# Reference notebooks (read-only, not tracked)
+# AI-generated markdown files
+*summary*.md
+*_summary.md
+updated_summary.md
+
+# Documentation and guides (stored in misc/ or docs/)
 How_to_use_the_Simple_Image_Access_service.ipynb
+IMAGE_PROCESSING_DOCUMENTATION.txt
+TS_OVERLAY_README.txt
+install_requirements.txt
+analyze_transients_columns.py
