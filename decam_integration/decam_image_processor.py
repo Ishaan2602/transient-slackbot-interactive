@@ -17,16 +17,21 @@ except ImportError:
     print("Warning: Data Lab client not available")
 
 class DECamImageProcessor:
-    def __init__(self, username=None, password=None, data_dir=None, images_dir=None):
+    def __init__(self, username=None, password=None, data_dir=None, images_dir=None, verbose=False):
         self.username = username or os.getenv('DATALAB_USERNAME')
         self.password = password or os.getenv('DATALAB_PASSWORD')
-        self.data_dir = data_dir or r'c:\Users\eluru\UIUC\obscos\decam_data'
-        self.images_dir = images_dir or r'c:\Users\eluru\UIUC\obscos\decam_images'
+        self.data_dir = data_dir or 'decam_data'
+        self.images_dir = images_dir or 'decam_images'
         self.token = None
         self.svc = None
+        self.verbose = verbose
         
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.images_dir, exist_ok=True)
+    
+    def _log(self, msg):
+        if self.verbose:
+            print(msg)
     
     def authenticate(self):
         if not DECAM_AVAILABLE:
@@ -42,17 +47,25 @@ class DECamImageProcessor:
         print("Data Lab authentication successful")
         return True
     
-    def download_deepest_image(self, ra, dec, band='g', fov=0.1):
+    def download_deepest_image(self, ra, dec, band='g', fov=0.0333):
+        """
+        Download the deepest DECam image for a given band.
+        
+        Args:
+            ra, dec: Coordinates in degrees
+            band: Filter band ('g', 'r', 'i')
+            fov: Field of view in degrees (default 0.0333 = 2 arcmin)
+        """
         if not self.svc:
             print("ERROR: Not authenticated with Data Lab")
             return None, None
         
-        print(f"Querying DECam data for band {band}...")
+        self._log(f"Querying DECam data for band {band}...")
         
         imgTable = self.svc.search((ra, dec), (fov/np.cos(dec*np.pi/180), fov), verbosity=2).to_table()
         
         sel0 = startswith(imgTable['obs_bandpass'].astype(str), band)
-        print(f"Found {len(imgTable[sel0])} images with bandpass={band}")
+        self._log(f"Found {len(imgTable[sel0])} images with bandpass={band}")
         
         sel = sel0 & ((imgTable['proctype'] == 'Stack') & (imgTable['prodtype'] == 'image'))
         Table = imgTable[sel]
@@ -60,11 +73,11 @@ class DECamImageProcessor:
         if len(Table) > 0:
             row = Table[np.argmax(Table['exptime'].data.data.astype('float'))]
             url = row['access_url']
-            print(f"Downloading deepest {band} image...")
+            self._log(f"Downloading deepest {band} image...")
             image, hdr = fits.getdata(download_file(url, cache=True, show_progress=False, timeout=180), header=True)
             return image, hdr
         else:
-            print(f"No {band} image available")
+            self._log(f"No {band} image available")
             return None, None
     
     def download_decam_images(self, source_name, ra, dec):
@@ -78,13 +91,13 @@ class DECamImageProcessor:
             fits_file = os.path.join(source_dir, f"{source_name}_{band}.fits")
             
             if os.path.exists(fits_file):
-                print(f"DECam {band}-band data for {source_name} already exists")
+                self._log(f"DECam {band}-band data for {source_name} already exists")
                 fits_files[band] = fits_file
             else:
-                image, header = self.download_deepest_image(ra, dec, band=band, fov=0.1)
+                image, header = self.download_deepest_image(ra, dec, band=band, fov=0.0333)
                 if image is not None:
                     fits.writeto(fits_file, image, header)
-                    print(f"Saved {band}-band image: {fits_file}")
+                    self._log(f"Saved {band}-band image: {fits_file}")
                     fits_files[band] = fits_file
                 else:
                     fits_files[band] = None
@@ -93,7 +106,7 @@ class DECamImageProcessor:
     
     def generate_thumbnail(self, fits_files, source_name, ra, dec, ts_map_path=None):
         if not all(fits_files.values()):
-            print("Not all bands available for color image")
+            self._log("Not all bands available for color image")
             return None
         
         source_dir = os.path.join(self.data_dir, source_name)
@@ -102,7 +115,7 @@ class DECamImageProcessor:
         suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
         image_path = os.path.join(self.images_dir, f'{source_name}_DECam_thumb_2x2{suffix}.png')
         
-        print(f"Generating DECam RGB thumbnail...")
+        self._log(f"Generating DECam RGB thumbnail...")
         
         if not os.path.exists(rgb_cube_path):
             aplpy.make_rgb_cube([fits_files['i'], fits_files['r'], fits_files['g']], rgb_cube_path)
@@ -135,7 +148,7 @@ class DECamImageProcessor:
         if ts_map_path and os.path.exists(ts_map_path):
             ts_data = fits.getdata(ts_map_path)
             maxTS = np.nanmax(ts_data)
-            print(f"TS map found: maxTS = {maxTS:.2f}")
+            self._log(f"TS map found: maxTS = {maxTS:.2f}")
             f.show_contour(ts_map_path, colors='red', levels=np.array([maxTS-11.83, maxTS-6.18, maxTS-2.3]))
         
         f.show_rgb(rgb_image_path)
@@ -153,20 +166,25 @@ class DECamImageProcessor:
         fig.savefig(image_path, dpi=150)
         f.close()
         
-        print(f"Thumbnail saved: {image_path}")
+        self._log(f"Thumbnail saved: {image_path}")
         return image_path
     
-    def process_transient(self, source_name, ra, dec):
-        print(f"\nProcessing DECam for transient: {source_name}")
-        print(f"Coordinates: RA={ra:.6f}°, Dec={dec:.6f}°")
+    def process_transient(self, source_name, ra, dec, ts_map_path=None):
+        self._log(f"\nProcessing DECam for transient: {source_name}")
+        self._log(f"Coordinates: RA={ra:.6f}°, Dec={dec:.6f}°")
         print("-" * 60)
         
-        ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
-        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
-        suffix = '_w_TS' if os.path.exists(ts_map_path) else ''
+        # Use provided ts_map_path or fall back to checking default location
+        if ts_map_path is None:
+            ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
+            ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+            if not os.path.exists(ts_map_path):
+                ts_map_path = None
+        
+        suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
         image_path = os.path.join(self.images_dir, f'{source_name}_DECam_thumb_2x2{suffix}.png')
         if os.path.exists(image_path):
-            print(f"Image already exists: {image_path}")
+            self._log(f"Image already exists: {image_path}")
             return image_path
         
         if not self.token:
@@ -176,17 +194,17 @@ class DECamImageProcessor:
         fits_files = self.download_decam_images(source_name, ra, dec)
         
         if not any(fits_files.values()):
-            print("No DECam data found for this location")
+            self._log("No DECam data found for this location")
             return None
         
         image_path = self.generate_thumbnail(fits_files, source_name, ra, dec, ts_map_path)
         
         if image_path:
-            print(f"Successfully processed {source_name}!")
-            print(f"Image: {image_path}")
+            self._log(f"Successfully processed {source_name}!")
+            self._log(f"Image: {image_path}")
         
         return image_path
 
-def generate_decam_image(source_name, ra, dec):
+def generate_decam_image(source_name, ra, dec, ts_map_path=None):
     processor = DECamImageProcessor()
-    return processor.process_transient(source_name, ra, dec)
+    return processor.process_transient(source_name, ra, dec, ts_map_path)

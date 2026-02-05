@@ -15,27 +15,41 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class WISEImageProcessor:
-    def __init__(self, wise_data_dir="wise_data", wise_images_dir="wise_images"):
+    def __init__(self, wise_data_dir="wise_data", wise_images_dir="wise_images", verbose=False):
         self.wise_data_dir = wise_data_dir
         self.wise_images_dir = wise_images_dir
+        self.verbose = verbose
         
         os.makedirs(self.wise_data_dir, exist_ok=True)
         os.makedirs(self.wise_images_dir, exist_ok=True)
     
-    def download_wise_cutout(self, source_name, ra, dec, size=1000):
+    def _log(self, msg):
+        if self.verbose:
+            print(msg)
+    
+    def download_wise_cutout(self, source_name, ra, dec, size=110):
+        """
+        Download WISE cutout from unWISE.
+        
+        Args:
+            source_name: Source identifier
+            ra, dec: Coordinates in degrees
+            size: Cutout size in pixels (unWISE pixel scale ~2.75"/pixel)
+                  Default 110 pixels = ~5 arcmin FOV
+        """
         source_dir = os.path.join(self.wise_data_dir, source_name)
         fits_file = os.path.join(source_dir, f"{source_name}_unwise_w1.fits")
         
         if os.path.exists(fits_file):
-            print(f"WISE data for {source_name} already exists")
+            self._log(f"WISE data for {source_name} already exists")
             return fits_file
         
         existing_fits = glob.glob(os.path.join(source_dir, "*.fits"))
         if existing_fits:
-            print(f"Found existing FITS files for {source_name}")
+            self._log(f"Found existing FITS files for {source_name}")
             return self._process_existing_fits(source_name, source_dir)
         
-        print(f"Downloading WISE cutout for {source_name}...")
+        self._log(f"Downloading WISE cutout for {source_name}...")
         
         unwise_url = f'https://unwise.me/cutout_fits?version=neo6&ra={ra}&dec={dec}&size={size}&bands=1'
         
@@ -44,22 +58,22 @@ class WISEImageProcessor:
         tar_file = os.path.join(self.wise_data_dir, f"{source_name}.tar.gz")
         
         import requests
-        print(f"Downloading from: {unwise_url}")
+        self._log(f"Downloading from: {unwise_url}")
         response = requests.get(unwise_url, timeout=60)
         
         if response.status_code == 200:
             with open(tar_file, 'wb') as f:
                 f.write(response.content)
-            print(f"Downloaded {len(response.content)} bytes")
+            self._log(f"Downloaded {len(response.content)} bytes")
         else:
-            print(f"Download failed with status code: {response.status_code}")
+            self._log(f"Download failed with status code: {response.status_code}")
             return None
         
         import tarfile
         if os.path.exists(tar_file):
             with tarfile.open(tar_file, 'r:gz') as tar:
                 tar.extractall(path=source_dir)
-            print(f"Extracted files to {source_dir}")
+            self._log(f"Extracted files to {source_dir}")
         
         import time
         time.sleep(0.5)
@@ -93,7 +107,7 @@ class WISEImageProcessor:
         fits_files = glob.glob(os.path.join(source_dir, "*.fits"))
         final_fits = os.path.join(source_dir, f"{source_name}_unwise_w1.fits")
         
-        print(f"Found {len(fits_files)} FITS files: {fits_files}")
+        self._log(f"Found {len(fits_files)} FITS files: {fits_files}")
         
         if len(fits_files) > 1:
             self._create_mosaic(fits_files, final_fits)
@@ -101,11 +115,11 @@ class WISEImageProcessor:
             import shutil
             try:
                 shutil.copy2(fits_files[0], final_fits)
-                print(f"Copied {fits_files[0]} to {final_fits}")
+                self._log(f"Copied {fits_files[0]} to {final_fits}")
             except:
                 return fits_files[0]
         else:
-            print("No FITS files found after extraction")
+            self._log("No FITS files found after extraction")
             return None
         
         return final_fits if os.path.exists(final_fits) else None
@@ -131,7 +145,7 @@ class WISEImageProcessor:
         for hdul in hdul_list:
             hdul.close()
         
-        print(f"Created mosaic: {output_file}")
+        self._log(f"Created mosaic: {output_file}")
     
     def generate_wise_thumbnail(self, source_name, ra, dec, output_size="5x5", ts_map_path=None):
         if output_size == "2x2":
@@ -146,13 +160,13 @@ class WISEImageProcessor:
         suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
         thumbnail_path = os.path.join(self.wise_images_dir, f"{source_name}_WISE_thumb_{output_size}{suffix}.png")
         if os.path.exists(thumbnail_path):
-            print(f"WISE thumbnail for {source_name} already exists")
+            self._log(f"WISE thumbnail for {source_name} already exists")
             return thumbnail_path
         
         fits_file = os.path.join(self.wise_data_dir, source_name, f"{source_name}_unwise_w1.fits")
         
         if not os.path.exists(fits_file):
-            print(f"FITS file not found: {fits_file}")
+            self._log(f"FITS file not found: {fits_file}")
             return None
         
         rcParams.update({'xtick.direction': 'in', 'ytick.direction': 'in'})
@@ -177,7 +191,7 @@ class WISEImageProcessor:
         if ts_map_path and os.path.exists(ts_map_path):
             ts_data = fits.getdata(ts_map_path)
             maxTS = np.nanmax(ts_data)
-            print(f"TS map found: maxTS = {maxTS:.2f}")
+            self._log(f"TS map found: maxTS = {maxTS:.2f}")
             f.show_contour(ts_map_path, colors='red', levels=np.array([maxTS-11.83, maxTS-6.18, maxTS-2.3]))
         
         f.show_grayscale(vmin=4.0, vmax=90000.0, stretch='log', smooth=None)
@@ -196,23 +210,28 @@ class WISEImageProcessor:
         f.close()
         plt.close(fig)
         
-        print(f"Generated WISE thumbnail: {thumbnail_path}")
+        self._log(f"Generated WISE thumbnail: {thumbnail_path}")
         return thumbnail_path
     
-    def process_transient_wise_image(self, source_name, ra, dec):
-        print(f"Processing WISE image for {source_name}...")
+    def process_transient_wise_image(self, source_name, ra, dec, ts_map_path=None):
+        self._log(f"Processing WISE image for {source_name}...")
         
         fits_file = self.download_wise_cutout(source_name, ra, dec)
         if not fits_file:
-            print(f"Failed to download WISE data for {source_name}")
+            self._log(f"Failed to download WISE data for {source_name}")
             return None
         
-        ts_maps_dir = os.path.join(os.path.dirname(self.wise_data_dir), 'ts_maps')
-        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+        # Use provided ts_map_path or fall back to checking default location
+        if ts_map_path is None:
+            ts_maps_dir = os.path.join(os.path.dirname(self.wise_data_dir), 'ts_maps')
+            ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+            if not os.path.exists(ts_map_path):
+                ts_map_path = None
+        
         thumbnail_path = self.generate_wise_thumbnail(source_name, ra, dec, "5x5", ts_map_path)
         
         return thumbnail_path
 
-def generate_wise_image_for_transient(source_name, ra, dec, wise_data_dir="wise_data", wise_images_dir="wise_images"):
+def generate_wise_image_for_transient(source_name, ra, dec, wise_data_dir="wise_data", wise_images_dir="wise_images", ts_map_path=None):
     processor = WISEImageProcessor(wise_data_dir, wise_images_dir)
-    return processor.process_transient_wise_image(source_name, ra, dec)
+    return processor.process_transient_wise_image(source_name, ra, dec, ts_map_path)

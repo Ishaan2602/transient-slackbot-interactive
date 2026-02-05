@@ -26,15 +26,20 @@ except ImportError:
     print("Warning: Image generation libraries not available.")
 
 class ASKAPImageProcessor:
-    def __init__(self, username=None, password=None, data_dir=None, images_dir=None):
+    def __init__(self, username=None, password=None, data_dir=None, images_dir=None, verbose=False):
         self.username = username or os.getenv('CASDA_USERNAME_PERSONAL')
         self.password = password or os.getenv('CASDA_PASSWORD_PERSONAL')
         self.data_dir = data_dir or r'c:\Users\eluru\UIUC\obscos\askap_data'
         self.images_dir = images_dir or r'c:\Users\eluru\UIUC\obscos\askap_images'
         self.casda = None
+        self.verbose = verbose
         
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.images_dir, exist_ok=True)
+    
+    def _log(self, msg):
+        if self.verbose:
+            print(msg)
     
     def authenticate(self):
         if not CASDA_AVAILABLE:
@@ -68,10 +73,10 @@ class ASKAPImageProcessor:
     
     def query_askap_data(self, ra_deg, dec_deg, radius_arcmin=2.5):
         if not self.casda or not self.casda._authenticated:
-            print("ERROR: Not authenticated with CASDA")
+            self._log("ERROR: Not authenticated with CASDA")
             return None
         
-        print(f"Querying CASDA at RA={ra_deg:.6f}°, Dec={dec_deg:.6f}°")
+        self._log(f"Querying CASDA at RA={ra_deg:.6f}°, Dec={dec_deg:.6f}°")
         
         centre = ac.SkyCoord(ra_deg*u.degree, dec_deg*u.degree, frame='icrs')
         result = Casda.query_region(centre, radius=radius_arcmin*u.arcmin)
@@ -83,12 +88,12 @@ class ASKAPImageProcessor:
             (np.char.endswith(public_data['filename'], 'A.fits'))
         ]
         
-        print(f"Found {len(subset)} ASKAP images")
+        self._log(f"Found {len(subset)} ASKAP images")
         return subset if len(subset) > 0 else None
     
     def download_cutouts(self, query_result, ra_deg, dec_deg, source_name, radius_arcmin=2.5):
         if query_result is None or len(query_result) == 0:
-            print("No data to download")
+            self._log("No data to download")
             return []
         
         source_dir = os.path.join(self.data_dir, source_name)
@@ -96,7 +101,7 @@ class ASKAPImageProcessor:
         
         centre = ac.SkyCoord(ra_deg*u.degree, dec_deg*u.degree, frame='icrs')
         
-        print(f"Downloading cutouts for {source_name}...")
+        self._log(f"Downloading cutouts for {source_name}...")
         
         url_list = self.casda.cutout(
             query_result[:1], 
@@ -107,24 +112,24 @@ class ASKAPImageProcessor:
         filelist = self.casda.download_files(url_list, savedir=source_dir)
         
         fits_files = glob.glob(os.path.join(source_dir, '*.fits'))
-        print(f"Downloaded {len(fits_files)} FITS files")
+        self._log(f"Downloaded {len(fits_files)} FITS files")
         
         return fits_files
     
     def process_fits_files(self, fits_files, source_name):
         if not fits_files:
-            print("No FITS files to process")
+            self._log("No FITS files to process")
             return None, None
         
         source_dir = os.path.join(self.data_dir, source_name)
         final_fits = os.path.join(source_dir, f'{source_name}_askap.fits')
         
-        print(f"Processing {len(fits_files)} FITS files...")
+        self._log(f"Processing {len(fits_files)} FITS files...")
         
         askap_hdus = [fits.open(fname)[0] for fname in fits_files]
         
         if len(askap_hdus) == 1:
-            print("Processing single FITS file")
+            self._log("Processing single FITS file")
             p_hdu = askap_hdus[0]
             
             image = p_hdu.data[0, 0, :, :]
@@ -138,7 +143,7 @@ class ASKAPImageProcessor:
             array_askap = image
             
         else:
-            print(f"Creating mosaic from {len(askap_hdus)} files")
+            self._log(f"Creating mosaic from {len(askap_hdus)} files")
             
             processed_files = []
             for i, p_hdu in enumerate(askap_hdus):
@@ -173,22 +178,22 @@ class ASKAPImageProcessor:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
         
-        print(f"FITS processing complete: {final_fits}")
+        self._log(f"FITS processing complete: {final_fits}")
         return array_askap, final_fits
     
     def generate_thumbnail(self, fits_path, source_name, ra_deg, dec_deg, ts_map_path=None):
         if not IMAGE_GENERATION_AVAILABLE:
-            print("Image generation libraries not available")
+            self._log("Image generation libraries not available")
             return None
         
         if not os.path.exists(fits_path):
-            print(f"FITS file not found: {fits_path}")
+            self._log(f"FITS file not found: {fits_path}")
             return None
         
         suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
         image_path = os.path.join(self.images_dir, f'{source_name}_ASKAP_thumb_5x5{suffix}.png')
         
-        print(f"Generating thumbnail image...")
+        self._log(f"Generating thumbnail image...")
         
         rcParams.update({'xtick.direction': 'in', 'ytick.direction': 'in'})
         
@@ -214,7 +219,7 @@ class ASKAPImageProcessor:
         if ts_map_path and os.path.exists(ts_map_path):
             ts_data = fits.getdata(ts_map_path)
             maxTS = np.nanmax(ts_data)
-            print(f"TS map found: maxTS = {maxTS:.2f}")
+            self._log(f"TS map found: maxTS = {maxTS:.2f}")
             f.show_contour(ts_map_path, colors='red', levels=np.array([maxTS-11.83, maxTS-6.18, maxTS-2.3]))
         
         f.show_grayscale(pmin=70.0, pmax=99.9, stretch='log', smooth=None)
@@ -232,7 +237,7 @@ class ASKAPImageProcessor:
         fig.savefig(image_path, dpi=150)
         f.close()
         
-        print(f"Thumbnail saved: {image_path}")
+        self._log(f"Thumbnail saved: {image_path}")
         return image_path
     
     def cleanup_temp_files(self, source_name):
@@ -246,19 +251,24 @@ class ASKAPImageProcessor:
                 pass
         
         if temp_files:
-            print(f"Cleaned up {len(temp_files)} temporary files")
+            self._log(f"Cleaned up {len(temp_files)} temporary files")
     
-    def process_transient(self, source_name, ra_deg, dec_deg):
-        print(f"\nProcessing transient: {source_name}")
-        print(f"Coordinates: RA={ra_deg:.6f}°, Dec={dec_deg:.6f}°")
-        print("-" * 60)
+    def process_transient(self, source_name, ra_deg, dec_deg, ts_map_path=None):
+        self._log(f"\nProcessing transient: {source_name}")
+        self._log(f"Coordinates: RA={ra_deg:.6f}°, Dec={dec_deg:.6f}°")
+        self._log("-" * 60)
         
-        ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
-        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
-        suffix = '_w_TS' if os.path.exists(ts_map_path) else ''
+        # Use provided ts_map_path or fall back to checking default location
+        if ts_map_path is None:
+            ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
+            ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
+            if not os.path.exists(ts_map_path):
+                ts_map_path = None
+        
+        suffix = '_w_TS' if ts_map_path and os.path.exists(ts_map_path) else ''
         image_path = os.path.join(self.images_dir, f'{source_name}_ASKAP_thumb_5x5{suffix}.png')
         if os.path.exists(image_path):
-            print(f"Image already exists: {image_path}")
+            self._log(f"Image already exists: {image_path}")
             return image_path
         
         if not self.casda or not self.casda._authenticated:
@@ -267,7 +277,7 @@ class ASKAPImageProcessor:
         
         query_result = self.query_askap_data(ra_deg, dec_deg)
         if query_result is None:
-            print("No ASKAP data found for this location")
+            self._log("No ASKAP data found for this location")
             return None
         
         fits_files = self.download_cutouts(query_result, ra_deg, dec_deg, source_name)
@@ -278,22 +288,20 @@ class ASKAPImageProcessor:
         if final_fits is None:
             return None
         
-        ts_maps_dir = os.path.join(os.path.dirname(self.data_dir), 'ts_maps')
-        ts_map_path = os.path.join(ts_maps_dir, f'{source_name}_TSmap.fits')
         image_path = self.generate_thumbnail(final_fits, source_name, ra_deg, dec_deg, ts_map_path)
         
         self.cleanup_temp_files(source_name)
         
         if image_path:
-            print(f"Successfully processed {source_name}!")
-            print(f"Image: {image_path}")
+            self._log(f"Successfully processed {source_name}!")
+            self._log(f"Image: {image_path}")
         
         return image_path
 
 
-def generate_askap_image(source_name, ra_deg, dec_deg, casda=None):
+def generate_askap_image(source_name, ra_deg, dec_deg, casda=None, ts_map_path=None):
     processor = ASKAPImageProcessor()
-    return processor.process_transient(source_name, ra_deg, dec_deg)
+    return processor.process_transient(source_name, ra_deg, dec_deg, ts_map_path)
 
 def authenticate_casda():
     processor = ASKAPImageProcessor()

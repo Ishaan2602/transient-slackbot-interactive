@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
 import schedule
 import time
 import threading
@@ -37,6 +38,16 @@ except ImportError:
     DECAM_AVAILABLE = False
     print("Warning: DECam integration not available")
 
+# TS Map Extractor Integration
+sys.path.append(os.path.join(os.path.dirname(__file__), 'ts_integration'))
+
+try:
+    from ts_map_extractor import TSMapExtractor, generate_ts_map_cutout # type: ignore
+    TSMAP_AVAILABLE = True
+except ImportError:
+    TSMAP_AVAILABLE = False
+    print("Warning: TS map extractor not available")
+
 # Voting System Integration
 sys.path.append(os.path.join(os.path.dirname(__file__), 'voting_system'))
 
@@ -57,6 +68,9 @@ except ImportError:
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 CHANNEL_ID = "C09KLUNLU68"
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET', 'de2481e9523c65ac16ae1c5bad90a28d')
+
+# Global verbose flag (set via --verbose/-v argument)
+VERBOSE = False
 
 CASDA_USERNAME = os.getenv('CASDA_USERNAME_PERSONAL', 'ishaang6@illinois.edu')
 CASDA_PASSWORD = os.getenv('CASDA_PASSWORD_PERSONAL', 'obscos_transient')
@@ -82,21 +96,37 @@ DECAM_IMAGES_DIR = os.path.join(BASE_DIR, 'decam_images')
 # TS maps directory
 TS_MAPS_DIR = os.path.join(BASE_DIR, 'ts_maps')
 
+# Socket Mode token for Events API (reactions/voting)
+SLACK_APP_TOKEN = os.getenv('SLACK_APP_TOKEN')
+
 # Initialize Slack app
 app = App(
     token=SLACK_BOT_TOKEN,
     signing_secret=SLACK_SIGNING_SECRET
 )
 
-askap_processor = ASKAPImageProcessor(CASDA_USERNAME, CASDA_PASSWORD, ASKAP_DATA_DIR, ASKAP_IMAGES_DIR) if ASKAP_AVAILABLE else None
-wise_processor = WISEImageProcessor(WISE_DATA_DIR, WISE_IMAGES_DIR) if WISE_AVAILABLE else None
-decam_processor = DECamImageProcessor(DATALAB_USERNAME, DATALAB_PASSWORD, DECAM_DATA_DIR, DECAM_IMAGES_DIR) if DECAM_AVAILABLE else None
+# Processors will be initialized in setup_directories() with correct verbose flag
+askap_processor = None
+wise_processor = None
+decam_processor = None
+ts_map_extractor = None
 vote_tracker = VoteTracker(BASE_DIR) if VOTING_AVAILABLE else None
 reaction_handler = ReactionHandler(app, BASE_DIR) if VOTING_AVAILABLE else None
 
 def setup_directories():
+    global askap_processor, wise_processor, decam_processor, ts_map_extractor
     for d in [ASKAP_DATA_DIR, ASKAP_IMAGES_DIR, WISE_DATA_DIR, WISE_IMAGES_DIR, DECAM_DATA_DIR, DECAM_IMAGES_DIR, TS_MAPS_DIR]:
         os.makedirs(d, exist_ok=True)
+    
+    # Initialize processors with verbose flag
+    if ASKAP_AVAILABLE:
+        askap_processor = ASKAPImageProcessor(CASDA_USERNAME, CASDA_PASSWORD, ASKAP_DATA_DIR, ASKAP_IMAGES_DIR, verbose=VERBOSE)
+    if WISE_AVAILABLE:
+        wise_processor = WISEImageProcessor(WISE_DATA_DIR, WISE_IMAGES_DIR, verbose=VERBOSE)
+    if DECAM_AVAILABLE:
+        decam_processor = DECamImageProcessor(DATALAB_USERNAME, DATALAB_PASSWORD, DECAM_DATA_DIR, DECAM_IMAGES_DIR, verbose=VERBOSE)
+    if TSMAP_AVAILABLE:
+        ts_map_extractor = TSMapExtractor(TS_MAPS_DIR)
 
 def load_last_check_time():
     try:
@@ -111,22 +141,51 @@ def save_last_check_time(t):
     with open(LAST_CHECK_FILE, 'w') as f:
         f.write(t.isoformat())
 
-def load_processed_transients():
+def load_processed_transients(verbose=True):
     if os.path.exists(NEW_TRANSIENTS_CSV):
         df = pd.read_csv(NEW_TRANSIENTS_CSV)
-        print(f"Loaded {len(df)} processed transients")
+        if verbose:
+            print(f"Loaded {len(df)} processed transients")
         return df
     return pd.DataFrame(columns=['source', 'observation', 'ra[deg]', 'dec[deg]', 
                                 'field', 'time', 'test_statistic', 'status', 'processed_at'])
 
+SAVE_COLS = ['source', 'observation', 'ra[deg]', 'dec[deg]', 'field', 'time', 'test_statistic', 'status', 'processed_at']
+
 def save_new_transients(new_df, processed_df):
+    """Save multiple transients (batch mode)."""
     new_df = new_df.copy()
     new_df['processed_at'] = pd.Timestamp.now(tz='UTC').isoformat()
-    cols = ['source', 'observation', 'ra[deg]', 'dec[deg]', 'field', 'time', 'test_statistic', 'status', 'processed_at']
-    subset = new_df[cols]
-    combined = pd.concat([processed_df, subset], ignore_index=True) if len(processed_df) > 0 else subset
+    subset = new_df[[c for c in SAVE_COLS if c in new_df.columns]]
+    # Ensure processed_df only has correct columns
+    if len(processed_df) > 0:
+        processed_df = processed_df[[c for c in SAVE_COLS if c in processed_df.columns]]
+        combined = pd.concat([processed_df, subset], ignore_index=True)
+    else:
+        combined = subset
     combined.to_csv(NEW_TRANSIENTS_CSV, index=False)
-    print(f"Saved {len(new_df)} transients")
+
+def save_single_transient(row, processed_df):
+    """Save one transient immediately after posting (prevents duplicates on interrupt)."""
+    row_data = {
+        'source': row['source'],
+        'observation': row['observation'],
+        'ra[deg]': row['ra[deg]'],
+        'dec[deg]': row['dec[deg]'],
+        'field': row['field'],
+        'time': row['time'],
+        'test_statistic': row['test_statistic'],
+        'status': row['status'],
+        'processed_at': pd.Timestamp.now(tz='UTC').isoformat()
+    }
+    new_row = pd.DataFrame([row_data])
+    # Ensure processed_df only has correct columns
+    if len(processed_df) > 0:
+        processed_df = processed_df[[c for c in SAVE_COLS if c in processed_df.columns]]
+        combined = pd.concat([processed_df, new_row], ignore_index=True)
+    else:
+        combined = new_row
+    combined.to_csv(NEW_TRANSIENTS_CSV, index=False)
 
 def process_transient_coordinates(row):
     if 'centroid_ra[deg]' in row.index and not pd.isna(row['centroid_ra[deg]']):
@@ -135,33 +194,42 @@ def process_transient_coordinates(row):
         ra, dec = float(row['ra[deg]']), float(row['dec[deg]'])
     return (ra + 360 if ra < 0 else ra), dec
 
-def generate_askap_image_for_transient(row, ra, dec):
+def extract_ts_map_for_transient(row, ra, dec):
+    """Extract TS map from g3 file for this transient."""
+    if not TSMAP_AVAILABLE or not ts_map_extractor:
+        return None
+    
+    # TS map g3 files only exist for ra5hdec-* fields
+    field = row.get('field', '')
+    if not field.startswith('ra5hdec'):
+        return None
+    
+    return ts_map_extractor.extract_ts_map_from_row(row)
+
+def generate_askap_image_for_transient(row, ra, dec, ts_map_path=None):
     if not ASKAP_AVAILABLE or not askap_processor:
         return None
     name = f"{row['source']}_{row['observation']}"
-    print(f"Generating ASKAP for {name}...")
-    return askap_processor.process_transient(name, ra, dec)
+    return askap_processor.process_transient(name, ra, dec, ts_map_path)
 
-def generate_wise_image_for_transient(row, ra, dec):
+def generate_wise_image_for_transient(row, ra, dec, ts_map_path=None):
     if not WISE_AVAILABLE or not wise_processor:
         return None
     name = f"{row['source']}_{row['observation']}"
-    print(f"Generating WISE for {name}...")
-    return wise_processor.process_transient_wise_image(name, ra, dec)
+    return wise_processor.process_transient_wise_image(name, ra, dec, ts_map_path)
 
-def generate_decam_image_for_transient(row, ra, dec):
+def generate_decam_image_for_transient(row, ra, dec, ts_map_path=None):
     if not DECAM_AVAILABLE or not decam_processor:
         return None
     name = f"{row['source']}_{row['observation']}"
-    print(f"Generating DECam for {name}...")
-    return decam_processor.process_transient(name, ra, dec)
+    return decam_processor.process_transient(name, ra, dec, ts_map_path)
 
 def generate_reference_links(ra, dec):
     legacy_url = f"https://www.legacysurvey.org/viewer?ra={ra:.5f}&dec={dec:.5f}&layer=ls-dr10&zoom=14&mark={ra:.5f},{dec:.5f}"
     simbad_url = f"http://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra:.5f}+{dec:.5f}"
     return legacy_url, simbad_url
 
-def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None, decam_image_path=None):
+def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_path=None, decam_image_path=None, ts_map_image_path=None):
     source_name = f"{row['source']}_{row['observation']}"
     
     ra_hours = ra / 15.0
@@ -248,40 +316,52 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
     # Add image status section
     image_fields = []
     
+    # TS Map status (SPT-3G)
+    if ts_map_image_path and os.path.exists(ts_map_image_path):
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "*SPT TS Map:* ✓ Available"
+        })
+    else:
+        image_fields.append({
+            "type": "mrkdwn",
+            "text": "*SPT TS Map:* Not available"
+        })
+    
     # ASKAP image status
     if askap_image_path and os.path.exists(askap_image_path):
         image_fields.append({
             "type": "mrkdwn",
-            "text": "*ASKAP Radio:* Generated"
+            "text": "*ASKAP Radio:* ✓"
         })
     elif ASKAP_AVAILABLE:
         image_fields.append({
             "type": "mrkdwn",
-            "text": "*ASKAP Radio:* No data available"
+            "text": "*ASKAP Radio:* No data"
         })
     
     # WISE image status
     if wise_image_path and os.path.exists(wise_image_path):
         image_fields.append({
             "type": "mrkdwn",
-            "text": "*WISE Infrared:* Generated"
+            "text": "*WISE Infrared:* ✓"
         })
     elif WISE_AVAILABLE:
         image_fields.append({
             "type": "mrkdwn",
-            "text": "*WISE Infrared:* Processing..."
+            "text": "*WISE Infrared:* Pending"
         })
     
     # DECam image status
     if decam_image_path and os.path.exists(decam_image_path):
         image_fields.append({
             "type": "mrkdwn",
-            "text": "*DECam Optical:* Generated"
+            "text": "*DECam Optical:* ✓"
         })
     elif DECAM_AVAILABLE:
         image_fields.append({
             "type": "mrkdwn",
-            "text": "*DECam Optical:* Processing..."
+            "text": "*DECam Optical:* Pending"
         })
     
     if image_fields:
@@ -311,10 +391,10 @@ def format_transient_message(row, ra, dec, askap_image_path=None, wise_image_pat
     
     return blocks
 
-def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path=None, decam_image_path=None):
-    """Post transient detection to Slack with optional ASKAP and WISE images."""
+def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path=None, decam_image_path=None, ts_map_image_path=None):
+    """Post transient detection to Slack with optional images."""
     source_name = f"{row['source']}_{row['observation']}"
-    blocks = format_transient_message(row, ra, dec, askap_image_path, wise_image_path, decam_image_path)
+    blocks = format_transient_message(row, ra, dec, askap_image_path, wise_image_path, decam_image_path, ts_map_image_path)
     
     # Post the main message with detailed blocks first
     response = app.client.chat_postMessage(
@@ -332,6 +412,8 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path
     
     # Upload images as a separate message (not threaded)
     images_to_upload = []
+    if ts_map_image_path and os.path.exists(ts_map_image_path):
+        images_to_upload.append(ts_map_image_path)
     if askap_image_path and os.path.exists(askap_image_path):
         images_to_upload.append(askap_image_path)
     if wise_image_path and os.path.exists(wise_image_path):
@@ -340,7 +422,6 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path
         images_to_upload.append(decam_image_path)
     
     if images_to_upload:
-        print(f"Uploading {len(images_to_upload)} images for {source_name}...")
         app.client.files_upload_v2(
             channel=CHANNEL_ID,
             file_uploads=[
@@ -349,9 +430,8 @@ def post_transient_to_slack(row, ra, dec, askap_image_path=None, wise_image_path
             ],
             initial_comment=f"Images for {source_name}"
         )
-        print(f"Images uploaded for {source_name}")
     
-    print(f"Posted {source_name} to Slack")
+    print(f"  ✓ Posted to Slack ({len(images_to_upload)} images)")
     return True
 
 def check_for_new_transients():
@@ -406,39 +486,40 @@ def check_for_new_transients():
         
         # Process all new transients
         transients_to_post = final_new_transients
+        total_count = len(transients_to_post)
         
         for i, (index, row) in enumerate(transients_to_post.iterrows()):
-            print(f"\nProcessing {i+1}/{len(transients_to_post)}: {row['source']}_{row['observation']}")
-            
-            # Get coordinates
+            remaining = total_count - (i + 1)
+            source_name = f"{row['source']}_{row['observation']}"
             ra, dec = process_transient_coordinates(row)
-            print(f"Coordinates: RA={ra:.6f}°, Dec={dec:.6f}°")
             
-            # Generate ASKAP image
-            askap_image_path = None
-            if ASKAP_AVAILABLE and askap_processor:
-                askap_image_path = generate_askap_image_for_transient(row, ra, dec)
+            # Extract TS map FITS (if available)
+            ts_map_path = None
+            ts_map_image_path = None
+            if TSMAP_AVAILABLE and ts_map_extractor:
+                ts_map_path = extract_ts_map_for_transient(row, ra, dec)
+                if ts_map_path:
+                    ts_map_image_path = generate_ts_map_cutout(ts_map_path, source_name, ra, dec, TS_MAPS_DIR)
             
-            # Generate WISE image
-            wise_image_path = None
-            if WISE_AVAILABLE and wise_processor:
-                wise_image_path = generate_wise_image_for_transient(row, ra, dec)
+            # Condensed status line with TS map note
+            ts_note = "TS:✓" if ts_map_path else "TS:✗"
+            print(f"[{i+1}/{total_count}] {source_name} @ ({ra:.4f}, {dec:.4f}) {ts_note}")
             
-            # Generate DECam image
-            decam_image_path = None
-            if DECAM_AVAILABLE and decam_processor:
-                decam_image_path = generate_decam_image_for_transient(row, ra, dec)
+            # Generate images (condensed - errors only)
+            askap_image_path = generate_askap_image_for_transient(row, ra, dec, ts_map_path) if ASKAP_AVAILABLE and askap_processor else None
+            wise_image_path = generate_wise_image_for_transient(row, ra, dec, ts_map_path) if WISE_AVAILABLE and wise_processor else None
+            decam_image_path = generate_decam_image_for_transient(row, ra, dec, ts_map_path) if DECAM_AVAILABLE and decam_processor else None
             
-            # Post to Slack (this includes uploading images)
-            post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path, decam_image_path)
+            # Post to Slack (includes TS map image if available)
+            post_transient_to_slack(row, ra, dec, askap_image_path, wise_image_path, decam_image_path, ts_map_image_path)
             
-            # Wait between transients to ensure all uploads complete
-            if i < len(transients_to_post) - 1:
-                print(f"Waiting 15 seconds before next transient...")
+            # Save THIS transient immediately (prevents duplicates if interrupted)
+            save_single_transient(row, processed_transients)
+            processed_transients = load_processed_transients(verbose=False)  # Reload to include new entry
+            
+            # Brief wait between transients
+            if remaining > 0:
                 time.sleep(15)
-        
-        # Save processed transients
-        save_new_transients(transients_to_post, processed_transients)
         
         # Handle first run
         if len(processed_transients) == 0:
@@ -448,7 +529,7 @@ def check_for_new_transients():
                 save_new_transients(historical_new, pd.DataFrame())
         
     else:
-        print("No new transients found")
+        print("No new transients found - exiting")
         
         # First run handling
         if len(processed_transients) == 0:
@@ -456,6 +537,9 @@ def check_for_new_transients():
             if len(historical_new) > 0:
                 print(f"First run: Marking {len(historical_new)} historical transients as processed")
                 save_new_transients(historical_new, pd.DataFrame())
+        
+        # Exit early since there's nothing to process
+        sys.exit(0)
     
     # Update last check time
     current_time = pd.Timestamp.now(tz='UTC')
@@ -524,31 +608,54 @@ def handle_vote_summary(message, say):
     summary = reaction_handler.get_voting_summary(transient_id)
     say(f"*{transient_id}*\n{summary}")
 
-def start_bolt_app():
-    """Start the Slack Bolt app."""
-    print("Starting Slack app...")
-    app.start(port=int(os.environ.get("PORT", 3000)))
+def start_socket_mode():
+    """Start Slack app in Socket Mode for receiving events (reactions)."""
+    if not SLACK_APP_TOKEN:
+        print("Warning: SLACK_APP_TOKEN not set - voting/reactions won't work")
+        return
+    print("Starting Socket Mode for Slack events...")
+    handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+    handler.start()
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='SPT-3G Transient Monitor')
+    parser.add_argument('--daemon', '-d', action='store_true', help='Run as daemon with scheduler and voting')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output from image processors')
+    parser.add_argument('--listen', '-l', action='store_true', help='Listen for votes only (no transient check)')
+    args = parser.parse_args()
+    
+    # Set verbose flag (VERBOSE is declared at module level)
+    VERBOSE = args.verbose
+    
     print("Transient Monitor with ASKAP Integration")
     print(f"Data source: {os.path.basename(TRANSIENTS_TXT)}")
     print(f"Tracking file: {os.path.basename(NEW_TRANSIENTS_CSV)}")
     if ASKAP_AVAILABLE:
         print("ASKAP images: ENABLED")
+    if SLACK_APP_TOKEN:
+        print("Socket Mode: ENABLED (voting available)")
     else:
-        print("ASKAP images: DISABLED")
+        print("Socket Mode: DISABLED (set SLACK_APP_TOKEN for voting)")
     
     setup_directories()
     
-    # Schedule daily checks
-    schedule.every().day.at("12:00").do(check_for_new_transients)
-    
-    print("Running initial check...")
-    check_for_new_transients()
-    
-    # Start Slack app in background
-    bolt_thread = threading.Thread(target=start_bolt_app)
-    bolt_thread.daemon = True
-    bolt_thread.start()
-    
-    run_scheduler()
+    # Listen-only mode: just receive votes, don't process transients
+    if args.listen:
+        print("\nListening for votes only (Ctrl+C to stop)...")
+        start_socket_mode()
+    else:
+        print("\nRunning check...")
+        check_for_new_transients()
+        
+        # Daemon mode: continuous monitoring + voting
+        if args.daemon:
+            schedule.every().day.at("12:00").do(check_for_new_transients)
+            # Start socket mode in background thread
+            if SLACK_APP_TOKEN:
+                socket_thread = threading.Thread(target=start_socket_mode)
+                socket_thread.daemon = True
+                socket_thread.start()
+            run_scheduler()
+        else:
+            print("Done. Use --daemon to run continuously, or --listen to receive votes.")
